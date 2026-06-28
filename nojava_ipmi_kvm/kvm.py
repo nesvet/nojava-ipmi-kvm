@@ -8,6 +8,7 @@ import uuid
 import re
 
 import asyncio
+import threading
 
 try:
     from typing import Any, Callable, List, Optional, Text, Tuple  # noqa: F401  # pylint: disable=unused-import
@@ -131,9 +132,18 @@ class HTML5KvmViewer(KvmViewer):
 
 
 def log_factory(additional_logging):
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
     def log(msg, *args, **kwargs):
         logger.info(msg, *args, **kwargs)
-        if additional_logging is not None:
+        if additional_logging is None:
+            return
+        if loop is not None and threading.current_thread() is not threading.main_thread():
+            loop.call_soon_threadsafe(additional_logging, msg, *args, **kwargs)
+        else:
             additional_logging(msg, *args, **kwargs)
 
     return log
