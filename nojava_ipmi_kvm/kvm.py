@@ -8,7 +8,6 @@ import uuid
 import re
 
 import asyncio
-import threading
 
 try:
     from typing import Any, Callable, List, Optional, Text, Tuple  # noqa: F401  # pylint: disable=unused-import
@@ -141,7 +140,7 @@ def log_factory(additional_logging):
         logger.info(msg, *args, **kwargs)
         if additional_logging is None:
             return
-        if loop is not None and threading.current_thread() is not threading.main_thread():
+        if loop is not None:
             loop.call_soon_threadsafe(additional_logging, msg, *args, **kwargs)
         else:
             additional_logging(msg, *args, **kwargs)
