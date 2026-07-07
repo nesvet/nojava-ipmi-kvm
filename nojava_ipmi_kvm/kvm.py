@@ -4,6 +4,7 @@ import os
 import platform
 import requests
 import subprocess
+import time
 import uuid
 import re
 
@@ -39,6 +40,18 @@ class DockerPortNotReadableError(Exception):
 
 
 class DockerTerminatedError(Exception):
+    pass
+
+
+class KvmLoginFailedError(DockerTerminatedError):
+    pass
+
+
+class KvmDownloadFailedError(DockerTerminatedError):
+    pass
+
+
+class KvmStartupTimeoutError(Exception):
     pass
 
 
@@ -213,6 +226,15 @@ def docker_terminated_message(return_code, docker_port=None):
     return message
 
 
+def _kvm_error_for_return_code(return_code, docker_port=None):
+    # type: (int, Optional[int]) -> Exception
+    if return_code == 3:
+        return KvmLoginFailedError("BMC login failed (incorrect username or password).")
+    if return_code == 4:
+        return KvmDownloadFailedError("Could not download the KVM viewer from the BMC.")
+    return DockerTerminatedError(docker_terminated_message(return_code, docker_port))
+
+
 def create_extra_args(host_config):
     # type: (HostConfig) -> List
     extra_args = [
@@ -383,7 +405,7 @@ async def start_kvm_container(
         try:
             poll_result = await _run_blocking(docker_process.poll)
             if poll_result is not None:
-                raise DockerTerminatedError(docker_terminated_message(docker_process.returncode, docker_port))
+                raise _kvm_error_for_return_code(docker_process.returncode, docker_port)
 
             def read_web_port():
                 # type: () -> int
@@ -402,6 +424,8 @@ async def start_kvm_container(
 
     log("Waiting for the Docker container to be up and ready...")
     loop = asyncio.get_event_loop()
+    connect_timeout = int(os.environ.get("KVM_CONNECT_TIMEOUT", 120))
+    ready_deadline = time.monotonic() + connect_timeout
 
     def get():
         nonlocal external_vnc_dns, web_port, authorization_key, authorization_value
@@ -411,6 +435,13 @@ async def start_kvm_container(
         return requests.head("http://{}:{}".format(external_vnc_dns, web_port), cookies=cookies)
 
     while True:
+        if time.monotonic() > ready_deadline:
+            await _run_blocking(terminate_docker)
+            raise KvmStartupTimeoutError(
+                "KVM session did not start within {}s. Check BMC password, session, or firmware.".format(
+                    connect_timeout
+                )
+            )
         try:
             response = await loop.run_in_executor(None, get)
             response.raise_for_status()
@@ -418,16 +449,7 @@ async def start_kvm_container(
         except (requests.ConnectionError, requests.HTTPError):
             poll_result = await _run_blocking(docker_process.poll)
             if poll_result is not None:
-                if not host_config.skip_login:
-                    raise DockerTerminatedError(
-                        docker_terminated_message(docker_process.returncode, docker_port)
-                        + " Maybe you entered a wrong password?"
-                    )
-                else:
-                    raise DockerTerminatedError(
-                        docker_terminated_message(docker_process.returncode, docker_port)
-                        + " Maybe you configured a wrong download endpoint or need a login?"
-                    )
+                raise _kvm_error_for_return_code(docker_process.returncode, docker_port)
             await asyncio.sleep(1)
 
     log("Docker container is up and running.")
@@ -460,6 +482,9 @@ __all__ = [
     "DockerNotInstalledError",
     "DockerPortNotReadableError",
     "DockerTerminatedError",
+    "KvmDownloadFailedError",
+    "KvmLoginFailedError",
+    "KvmStartupTimeoutError",
     "WebserverNotReachableError",
     "start_kvm_container",
 ]
